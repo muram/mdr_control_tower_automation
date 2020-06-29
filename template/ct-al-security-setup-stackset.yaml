@@ -106,7 +106,7 @@ Resources:
     Properties:
       FunctionName: AlertLogic-CT-Register
       Description: CT AL - Function to handle AlertLogic deployment registration
-      Handler: "ct_al_register_v2.lambda_handler"
+      Handler: "ct_al_register.lambda_handler"
       Role: !GetAtt ALRegisterRole.Arn
       Code:
         S3Bucket: !Join [".", [!Ref SourceBucket, !Ref "AWS::Region"]]
