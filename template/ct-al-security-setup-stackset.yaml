@@ -1,0 +1,213 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CT AlertLogic Automation
+Parameters:
+  OrgId:
+    Type: String
+    Description: The Amazon Organizations ID
+    MinLength: 12
+    MaxLength: 12
+    AllowedPattern: '^[o][\-][a-z0-9]{10}$'
+    ConstraintDescription: The Org Id must be a 12 character string starting with o- and followed by 10 lower case alphanumeric characters
+  AlertLogicCustomerId:
+    Type: String
+    Description: AlertLogic Customer Id
+  AlertLogicAPIAccessKey:
+    Type: String
+    NoEcho: False
+    Description: AlertLogic API Access Key / User name
+  AlertLogicAPISecretKey:
+    Type: String
+    NoEcho: True
+    Description: AlertLogic API Secret Key / Password
+  TargetRegion:
+    Type: String
+    Description: Target regions for AlertLogic deployment
+    Default: us-east-1
+  FullRegionCoverage:
+    Type: String 
+    Description: AlertLogic full region deployment scope (yes / no)
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  SourceBucket:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: '[a-zA-Z0-9-.]*'
+    Description: >-
+        The prefix of the S3 bucket which contains Lambda package.
+        Note that the name of the bucket must contain a region name suffix.
+        The following is the valid backet name syntax = <bucket_name_prefix>.us-east-1
+    Default: alertlogic-public-repo
+
+Mappings: 
+  SourceCode:
+    Key:
+      Register: "lambda_packages/register_1.0.1.zip"
+
+Resources:
+  ALCredentials:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: AlertLogic API Credentials
+      Name: ALCredentialsSecret
+      SecretString:
+        Fn::Join:
+        - ''
+        - - '{"ALAccessKey":"'
+          - Ref: AlertLogicAPIAccessKey
+          - '","ALSecretKey": "'
+          - Ref: AlertLogicAPISecretKey
+          - '","ALCID": "'
+          - Ref: AlertLogicCustomerId
+          - '"}'
+
+  ALHubTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      DisplayName: AlertLogic Topic for Role registration      
+      TopicName: AlertLogicCTHubTopic
+
+  ALHubTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref ALHubTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Id: '__default_policy_ID'
+        Statement:
+        - Sid: grant-publish
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Resource: !Ref ALHubTopic
+          Action:
+            - SNS:Publish
+          Condition:
+            StringEquals:
+              aws:PrincipalOrgID: !Ref OrgId
+        - Sid: grant-receive
+          Effect: Allow
+          Principal:
+            Service: 'lambda.amazonaws.com'
+          Resource: !Ref ALHubTopic
+          Action:
+            - SNS:Subscribe
+            - SNS:Receive
+          Condition:
+            StringEquals:
+              AWS:SourceOwner: !Sub '${AWS::AccountId}'
+            ArnLike:
+              aws:SourceArn: !GetAtt ALRegister.Arn
+
+  ALRegister:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: AlertLogic-CT-Register
+      Description: CT AL - Function to handle AlertLogic deployment registration
+      Handler: "ct_al_register_v2.lambda_handler"
+      Role: !GetAtt ALRegisterRole.Arn
+      Code:
+        S3Bucket: !Join [".", [!Ref SourceBucket, !Ref "AWS::Region"]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "Key", "Register"]]]
+      Runtime: "python3.7"
+      MemorySize: 128
+      Timeout: 300
+      Environment:
+        Variables:
+          Secret: !Ref ALCredentials
+          FullRegionCoverage: !Ref FullRegionCoverage
+          TargetRegion: !Ref TargetRegion
+
+  ALRegisterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AlertLogic-Register-Role
+      Description: CT AL - Role used by lambda for life cycle / new account creation
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+      - PolicyName: CloudWatchLog
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              -  !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+      - PolicyName: SecretManager
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Ref ALCredentials
+            
+  ALRegisterDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ALRegisterDLQ
+
+  ALRegisterDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ALRegisterDLQ
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Action:
+              - "SQS:SendMessage"
+            Effect: "Allow"
+            Resource: !GetAtt ALRegisterDLQ.Arn
+            Principal:
+              AWS:
+                - "*"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref ALHubTopic
+
+  ALRegisterSNSTrigger:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !GetAtt ALRegister.Arn
+      Protocol: lambda
+      TopicArn: !Ref ALHubTopic
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ALRegisterDLQ.Arn
+
+  ALRegisterPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ALRegister.Arn
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref ALHubTopic
+
+Outputs:
+  RegistrationSNS:
+    Value:
+      Ref: ALHubTopic
+    Description:
+      Registration SNS Topic to send registrations requests to.
+  Secret:
+    Value:
+      Ref: ALCredentials
+    Description:
+      Alert Logic credentials stored in SecretsManager
+

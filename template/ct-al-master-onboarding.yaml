@@ -1,0 +1,369 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CT AlertLogic Automation
+Parameters:
+  OrgId:
+    Type: String
+    Description: The Amazon Organization ID
+    MinLength: 12
+    MaxLength: 12
+    AllowedPattern: '^[o][\-][a-z0-9]{10}$'
+    ConstraintDescription: The Org Id must be a 12 character string starting with o- and followed by 10 lower case alphanumeric characters
+  SourceBucket:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: '[a-zA-Z0-9-.]*'
+    Description: The prefix of the S3 bucket which contains Lambda package. Note that the name of the bucket must contain a region name suffix. The following is the valid backet name syntax = <bucket_name_prefix>.us-east-1
+    Default: alertlogic-public-repo
+  AuditAccount:
+    Type: String
+    Description: Control Tower AWS audit account
+    AllowedPattern: '^[0-9]{12}$'
+    MinLength: 12
+    MaxLength: 12
+  LogArchiveAccount:
+    Type: String
+    Description: Control Tower AWS log archive account
+    AllowedPattern: '^[0-9]{12}$'
+    MinLength: 12
+    MaxLength: 12
+  SecurityAccount:
+    Type: String
+    Description: Designated AWS security account
+    AllowedPattern: '^[0-9]{12}$'
+    MinLength: 12
+    MaxLength: 12
+  IncludeOrganizationalUnits:
+    Type: CommaDelimitedList
+    Description: Organizational Units to protect. Note that existing OU members will be setup for protection during CFT deployment.
+  ExcludeOrganizationalUnits:
+    Type: CommaDelimitedList
+    Description: Organizational Unitsto Exclude from protection. Note that AWS Accounts added to spefied OU will not be protected.
+  AlertLogicCustomerId:
+    Type: String
+    Description: AlertLogic Customer Id
+  StackSetName:
+    Type: String
+    Description: Name of the StackSet that will be deployed in Control Tower Master account
+    Default: 'AlertLogic-CT'
+  StackSetTemplateUrl:
+    Type: String
+    Description: S3 URL of the stackset template (ct-al-master-stackset.yaml)
+    Default: https://s3.amazonaws.com/alertlogic-public-repo.us-east-1/templates/ct-al-master-stackset.yaml
+  CentralizedRoleStackSetName:
+    Type: String
+    Description: Name of the Cloud Trail Logs Collection IAM Role StackSet. This StackSet will be deployed in Control Tower Master account
+    Default: 'AlertLogic-CT-Central-IAM-Role'
+  SecurityAccountSetupStackSetName:
+    Type: String
+    Description: Name of the Security Account Setup StackSet that will be deployed in the Security Account
+    Default: 'AlertLogic-CT-Security-Account-Setup'
+  SecurityAccountSetupStackSetTemplateUrl:
+    Type: String
+    Description: S3 URL of the stackset template (ct-al-master-stackset.yaml)
+    Default: https://s3.amazonaws.com/alertlogic-public-repo.us-east-1/templates/ct-al-security-setup-stackset.yaml
+  TargetRegion:
+    Type: String
+    Description: Target regions for AlertLogic deployment
+    Default: us-east-1
+  FullRegionCoverage:
+    Type: String 
+    Description: AlertLogic full region deployment scope (yes / no)
+    Default: true
+    AllowedValues:
+      - true
+      - false
+  AlertLogicAPIAccessKey:
+    Type: String
+    NoEcho: False
+    Description: AlertLogic API Access Key / User name
+  AlertLogicAPISecretKey:
+    Type: String
+    NoEcho: True
+    Description: AlertLogic API Secret Key / Password
+  AlertLogicDeploymentMode:
+    Type: String 
+    Description: >-
+        Set to 'Automatic' if you want Alert Logic to create subnets for ids and scanning appliances.
+        If you want to deploy Alert Logic appliances yourself, set this option to 'Manual'
+    Default: Manual
+    AllowedValues:
+      - Automatic
+      - Manual
+
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups:
+      -
+        Label:
+          default: "Alert Logic MDR Configuration"
+        Parameters:
+          - AlertLogicCustomerId
+          - AlertLogicAPIAccessKey
+          - AlertLogicAPISecretKey
+          - AlertLogicDeploymentMode
+          - SecurityAccount
+          - IncludeOrganizationalUnits
+          - ExcludeOrganizationalUnits
+          - TargetRegion
+          - FullRegionCoverage
+      - 
+        Label:
+          default: "AWS Control Tower Information"
+        Parameters:
+          - OrgId
+          - LogArchiveAccount
+          - AuditAccount
+      -
+        Label:
+          default: "Cloud Formation and StackSets Information."
+        Parameters:
+          - StackSetName
+          - StackSetTemplateUrl
+          - CentralizedRoleStackSetName
+          - SecurityAccountSetupStackSetName
+          - SecurityAccountSetupStackSetTemplateUrl
+          - SourceBucket
+    ParameterLabels: 
+      AlertLogicCustomerId:
+        default: "Alert Logic Customer ID"
+      AlertLogicAPIAccessKey:
+        default: "Alert Logic API Access Key"
+      AlertLogicAPISecretKey:
+        default: "Alert Logic API Secret"
+      AlertLogicDeploymentMode:
+        default: "Alert Logic Appliances Deployment Mode"
+      SecurityAccount:
+        default: "AWS Account ID to deploy Alert Logic's AWS Control Tower Automation to"
+      IncludeOrganizationalUnits:
+        default: "Organizational Units to protect"
+      ExcludeOrganizationalUnits:
+        default: "Organizational Units to exclude from protection"
+      TargetRegion:
+        default: "Target region"
+      FullRegionCoverage:
+        default: "Protect All Regions?"
+      OrgId:
+        default: "Organization ID"
+      LogArchiveAccount:
+        default: "Log Archive Account ID"
+      AuditAccount:
+        default: "Audit Account ID"
+
+Mappings: 
+  SourceCode:
+    Key:
+      Register: "lambda_packages/register_1.0.1.zip"
+      LifeCycle: "lambda_packages/lifecycle_1.0.1.zip"
+      Deployer: "lambda_packages/deployer_1.0.1.zip"
+      Onboarding: "lambda_packages/onboarding_1.0.1.zip"
+
+Resources:
+  ALCredentials:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: AlertLogic API Credentials
+      Name: ALCredentialsSecret
+      SecretString:
+        Fn::Join:
+        - ''
+        - - '{"ALAccessKey":"'
+          - Ref: AlertLogicAPIAccessKey
+          - '","ALSecretKey": "'
+          - Ref: AlertLogicAPISecretKey
+          - '","ALCID": "'
+          - Ref: AlertLogicCustomerId
+          - '"}'
+  
+  ALOnboarding:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: AlertLogic-CT-Onboarding
+      Description: CT AL - Function to handle AlertLogic infrastructure onboarding
+      Handler: "ct_al_onboarding.lambda_handler"
+      Role: !GetAtt ALOnboardingRole.Arn
+      Code:
+        S3Bucket: !Join [".", [!Ref SourceBucket, !Ref "AWS::Region"]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "Key", "Onboarding"]]]
+      Runtime: "python3.7"
+      MemorySize: 128
+      Timeout: 900
+
+  ALOnboardingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AlertLogic-Onboarding-Role
+      Description: CT AL - Role used by lambda to prep AWS infrastructure for AlertLogic onboarding
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+      - PolicyName: ALOnboarding
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !Sub 'arn:aws:iam::${AuditAccount}:role/AWSControlTowerExecution'
+              - !Sub 'arn:aws:iam::${LogArchiveAccount}:role/AWSControlTowerExecution'
+              - !Sub 'arn:aws:iam::${SecurityAccount}:role/AWSControlTowerExecution'
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/AWSControlTowerStackSetRole'
+          - Effect: Allow
+            Action:
+              - cloudformation:CreateStackSet
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - cloudformation:ListStackInstances
+              - cloudformation:CreateStackInstances
+              - cloudformation:DescribeStackSetOperation
+              - cloudformation:DescribeStackInstance
+            Resource:
+              - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/${StackSetName}:*'
+              - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/${CentralizedRoleStackSetName}:*'
+              - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/${SecurityAccountSetupStackSetName}:*'
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource:
+              - !Sub 'arn:aws:s3:::alertlogic-public-repo.${AWS::Region}/templates/ct-al*'
+              - !Sub 'arn:aws:s3:::alertlogic-cloud-formation-templates-733251395267/*'
+          - Effect: Allow
+            Action:
+              - organizations:ListAccountsForParent
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Ref ALCredentials
+
+  ALLifeCycleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AlertLogic-LifeCycle-Role
+      Description: CT AL - Role used by lambda for life cycle / new account creation
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+      - PolicyName: StackSetPolicy
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+              - cloudformation:ListStackInstances
+              - cloudformation:CreateStackInstances
+            Resource:
+              - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/${StackSetName}:*'
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+
+  ALLifeCycle:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: AlertLogic-CT-LifeCycle
+      Description: CT AL - Function to handle Control Tower LifeCycle
+      Handler: "ct_al_lifecycle.lambda_handler"
+      Role: !GetAtt ALLifeCycleRole.Arn
+      Code:
+        S3Bucket: !Join [".", [!Ref SourceBucket, !Ref "AWS::Region"]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "Key", "LifeCycle"]]]
+      Runtime: "python3.7"
+      MemorySize: 128
+      Timeout: 300
+      Environment:
+        Variables:
+            stack_set_name: !Ref StackSetName
+
+  CreateAccountLifeCycleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: FlowLog - CT Life Cycle for CreateManageAccount
+      EventPattern:
+        {
+          "source": [
+            "aws.controltower"
+          ],
+          "detail-type": [
+            "AWS Service Event via CloudTrail"
+          ],
+          "detail": {
+            "eventSource": [
+              "controltower.amazonaws.com"
+            ],
+            "eventName": [
+              "CreateManagedAccount"
+            ]
+          }
+        }
+      State: ENABLED
+      Targets:
+      - Arn: !GetAtt ALLifeCycle.Arn
+        Id: "CreateAccountLifeCycle"
+
+  CreateAccountLifeCycleRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ALLifeCycle.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt CreateAccountLifeCycleRule.Arn
+
+  OnboardingAL:
+    Type: "AWS::CloudFormation::CustomResource"
+    Properties:
+      ServiceToken: !GetAtt ALOnboarding.Arn
+      OrgId: !Ref OrgId  
+      Secret: !Ref ALCredentials
+      SecurityAccount: !Ref SecurityAccount
+      LogArchiveAccount: !Ref LogArchiveAccount
+      AlertLogicCustomerId: !Ref AlertLogicCustomerId
+      MasterAccount: !Ref AWS::AccountId
+      MasterRegion: !Ref AWS::Region
+      SourceBucket: !Ref SourceBucket
+      AuditAccount: !Ref AuditAccount
+      StackSetUrl: !Ref StackSetTemplateUrl
+      TargetRegion: !Ref TargetRegion
+      StackSetName: !Ref StackSetName
+      SecurityAccountSetupStackSetName: !Ref SecurityAccountSetupStackSetName
+      SecurityAccountSetupStackSetTemplateUrl: !Ref SecurityAccountSetupStackSetTemplateUrl
+      IncludeOrganizationalUnits: !Ref IncludeOrganizationalUnits
+      ExcludeOrganizationalUnits: !Ref ExcludeOrganizationalUnits
+      CentralizedRoleStackSetName: !Ref CentralizedRoleStackSetName
+      AlertLogicDeploymentMode: !Ref AlertLogicDeploymentMode
+
