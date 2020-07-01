@@ -17,9 +17,9 @@
 #
 import boto3, json, time, sys, os, base64, copy
 import logging
+import requests
 import almdrlib
 from botocore.exceptions import ClientError
-from botocore.vendored import requests
 
 LOGGER = logging.getLogger()
 LOGGER.setLevel(logging.INFO)
