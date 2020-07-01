@@ -18,8 +18,7 @@
 import boto3, json, time, base64
 import logging
 import almdrlib
-from botocore.vendored import requests
-
+import requests
 
 WAIT_TIME = 5   # Wait for 5 seconds
 LOGGER = logging.getLogger()
@@ -494,7 +493,7 @@ def lambda_handler(event, context):
                 if v['OutputKey'] == 'RoleARN':
                     ci_x_account_role_arn = v['OutputValue']
                     break
-            LOGGER.info("ALCentralizedRoleArn: {ci_x_account_role_arn}")
+            LOGGER.info(f"ALCentralizedRoleArn: {ci_x_account_role_arn}")
 
             #
             # Create Control Tower Master account StackSet
