@@ -15,7 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #
-import boto3, json, time, base64
+import boto3, json, time, base64, os
 import logging
 import almdrlib
 import requests
@@ -27,8 +27,11 @@ logging.getLogger('boto3').setLevel(logging.CRITICAL)
 logging.getLogger('botocore').setLevel(logging.CRITICAL)
 almdrlib.set_logger('almdrlib', logging.INFO)
 
+global_endpoint = os.environ.get('AlertLogicApiEndpoint', 'production').lower()
+
 session = boto3.Session()
 sns_name = 'aws-controltower-AllConfigNotifications'
+
 sqs_policy_template = {
   "Version": "2012-10-17",
   "Id": "SQSDefaultPolicy",
@@ -64,15 +67,19 @@ stackset_params_map = {
         'MasterRegion',
         'AlertLogicCentralizedRoleArn',
         'AlertLogicSourceRoleTemplateUrl',
+        'FullRegionCoverage',
+        'CoverageTags',
         'AlertLogicDeploymentMode',
-        'SourceBucket'
+        'SourceBucket',
+        'AlertLogicApiEndpoint'
         ],
     SECURITY_SETUP_TYPE: [
         'OrgId',
         'AlertLogicCustomerId',
         'TargetRegion',
         'SourceBucket',
-        'FullRegionCoverage'
+        'FullRegionCoverage',
+        'AlertLogicApiEndpoint'
         ]
 }
 
@@ -245,6 +252,13 @@ def get_secret(target_session, region, secret_name):
             return decoded_binary_secret
 
 
+def get_output_value(results, account_id, region, name):
+    output = results[account_id][region]
+    for v in output:
+        if v['OutputKey'] == name:
+            return v['OutputValue']
+    return None
+                
 def dict_to_param_list(payload, type=MASTER_TYPE):
     stackset_param_list = []
     if type not in stackset_params_map:
@@ -255,7 +269,10 @@ def dict_to_param_list(payload, type=MASTER_TYPE):
         if key in keys:
             keyDict = {}
             keyDict['ParameterKey'] = key
-            keyDict['ParameterValue'] = value
+            if isinstance(value, list):
+                keyDict['ParameterValue'] = ','.join(value)
+            else:
+                keyDict['ParameterValue'] = value
             stackset_param_list.append(keyDict)
 
     return stackset_param_list
@@ -272,33 +289,55 @@ def get_ci_role_cft_url(target_session, role_type, region, event):
         raise ValueError(f"Invalid Secret: {secret_name}")
 
     auth = json.loads(al_credentials)
-    themis_client = almdrlib.client('themis', access_key_id=auth['ALAccessKey'], secret_key=auth['ALSecretKey'])
+    LOGGER.info(f"Initializing client for {auth['ALAccessKey']} using {global_endpoint} endpoint")
+    themis_client = almdrlib.client(
+            'themis', 
+            access_key_id=auth['ALAccessKey'],
+            secret_key=auth['ALSecretKey'],
+            global_endpoint=global_endpoint
+        )
     
     response = themis_client.get_role(
             account_id=event['ResourceProperties']['AlertLogicCustomerId'],
             platform_type='aws',
             role_type=role_type,
-            role_version='latest').json()
+            role_version='latest'
+        ).json()
 
     ci_x_account_ct_cft_url = response['cft']['s3_url']
     LOGGER.info(f"Alert Logic Cross Account StackSet URL: {ci_x_account_ct_cft_url}")
     return ci_x_account_ct_cft_url
 
 
-def get_protected_accounts(included_ou_list, excluded_ou_list, core_accounts):
+def get_protected_accounts(included_ou_list, excluded_ou_list, master_account, core_accounts):
     '''
     Get List accounts to protect
     '''
     accounts = set()
     try:
+        kwargs = {}
         orgs_client = session.client('organizations')
-        for parent_id in included_ou_list:
-            response = orgs_client.list_accounts_for_parent(
-                ParentId=parent_id
-                )
-            accounts.update(
-                [account['Id'] for account in response['Accounts'] if account['Status'] == 'ACTIVE']
-                )
+        if 'ALL' in included_ou_list:
+            while True:
+                response = orgs_client.list_accounts(**kwargs)
+                accounts.update([
+                        account['Id'] 
+                        for account in response['Accounts'] if account['Status'] == 'ACTIVE' and account['Id'] != master_account
+                    ])
+                if not 'NextToken' in response: break
+                kwargs['NextToken'] = response['NextToken']
+        else:
+            for parent_id in included_ou_list:
+                kwargs['ParentId'] = parent_id
+                while True:
+                    response = orgs_client.list_accounts_for_parent(**kwargs)
+                    accounts.update([
+                            account['Id'] 
+                            for account in response['Accounts'] if account['Status'] == 'ACTIVE'and account['Id'] != master_account
+                        ])
+                    if not 'NextToken' in response: break
+                    kwargs['NextToken'] = response['NextToken']
+                    
         return list(accounts.difference(core_accounts))
     except Exception as e:
         LOGGER.error("Could not list accounts for parent : {}".format(e))
@@ -307,6 +346,7 @@ def get_protected_accounts(included_ou_list, excluded_ou_list, core_accounts):
 
 def create_stack_instance(
         target_session, stackset_name, org_id, accounts, regions,
+        parameter_overrides=None,
         wait_for_completion=False, outputs=False):
     '''
     Create stackset in particular account + region
@@ -317,11 +357,15 @@ def create_stack_instance(
             "Calling create_stack_instances... StackSetName={}, Accounts={}, Regions={}".format(
                 stackset_name, accounts, regions)
             )
-        response = cfn_client.create_stack_instances(
-            StackSetName=stackset_name,
-            Accounts=accounts,
-            Regions=regions
-            )
+        kwargs = {
+            'StackSetName': stackset_name,
+            'Accounts': accounts,
+            'Regions': regions
+        }
+        if parameter_overrides:
+            kwargs['ParameterOverrides'] = parameter_overrides
+            
+        response = cfn_client.create_stack_instances(**kwargs)
         operation_id = response["OperationId"]
         LOGGER.debug(response)
         LOGGER.info(
@@ -448,15 +492,16 @@ def lambda_handler(event, context):
             # 'aws-controltower-AllConfigNotifications' SNS Topic in AuditAccount
             #
 
-            audit_account_session = assume_role(audit_account, 'AWSControlTowerExecution', event['ResourceProperties']['OrgId'])
-            audit_sns_handler(audit_account_session, region, event)
+            # audit_account_session = assume_role(audit_account, 'AWSControlTowerExecution', event['ResourceProperties']['OrgId'])
+            # audit_sns_handler(audit_account_session, region, event)
 
-            log_archive_session = assume_role(log_archive_account, 'AWSControlTowerExecution', event['ResourceProperties']['OrgId'])
-            log_archive_sqs_handler(log_archive_session, region, event)
+            # log_archive_session = assume_role(log_archive_account, 'AWSControlTowerExecution', event['ResourceProperties']['OrgId'])
+            # log_archive_sqs_handler(log_archive_session, region, event)
 
             registration_sns, secret = security_account_setup_handler(session, account, region, event)
 
             # Create and deploy Central CloudTrail Log Collection StackSet
+            # to Log Archive and Audit accounts
             # TODO: Move this code to its own function
             ci_x_account_ct_cft_url = get_ci_role_cft_url(session, 'ci_x_account_ct', region, event)
 
@@ -483,17 +528,16 @@ def lambda_handler(event, context):
                     target_session=session,
                     stackset_name=stackset_name,
                     org_id=org_id,
-                    accounts=[log_archive_account],
+                    accounts=[log_archive_account, audit_account],
                     regions=[region],
                     wait_for_completion=True,
                     outputs=True
                     )
-            output = outputs[log_archive_account][region]
-            for v in output:
-                if v['OutputKey'] == 'RoleARN':
-                    ci_x_account_role_arn = v['OutputValue']
-                    break
-            LOGGER.info(f"ALCentralizedRoleArn: {ci_x_account_role_arn}")
+            ci_x_account_role_arn = get_output_value(outputs, log_archive_account, region, 'RoleARN')
+            LOGGER.info(f"Log Archive Account ALCentralizedRoleArn: {ci_x_account_role_arn}")
+
+            ci_x_audit_account_role_arn = get_output_value(outputs, audit_account, region, 'RoleARN')
+            LOGGER.info(f"Audit Account ALCentralizedRoleArn: {ci_x_audit_account_role_arn}")
 
             #
             # Create Control Tower Master account StackSet
@@ -502,7 +546,7 @@ def lambda_handler(event, context):
             if mode == 'Automatic':
                 role_type = 'ci_full'
             else:
-                role_type == 'ci_manual'
+                role_type = 'ci_manual'
             ci_cft_url = get_ci_role_cft_url(session, role_type, region, event)
             stackset_param_list = dict_to_param_list(event['ResourceProperties'])
 
@@ -529,17 +573,18 @@ def lambda_handler(event, context):
                         "ParameterValue": secret
                     }
                 ])
-
+                
+            stackset_name = event['ResourceProperties']['StackSetName']
             LOGGER.info(f"Creating {stackset_name} stackset with {stackset_param_list} parameters")
             stackset_result = create_stack_set(
-                target_session=session,
-                region=region,
-                stackset_name=event['ResourceProperties']['StackSetName'],
-                stackset_url=event['ResourceProperties']['StackSetUrl'],
-                parameter_list=stackset_param_list,
-                admin_role='arn:aws:iam::' + account + ':role/service-role/AWSControlTowerStackSetRole',
-                exec_role='AWSControlTowerExecution',
-                capabilities_list=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
+                    target_session=session,
+                    region=region,
+                    stackset_name=stackset_name,
+                    stackset_url=event['ResourceProperties']['StackSetUrl'],
+                    parameter_list=stackset_param_list,
+                    admin_role='arn:aws:iam::' + account + ':role/service-role/AWSControlTowerStackSetRole',
+                    exec_role='AWSControlTowerExecution',
+                    capabilities_list=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND']
                 )
 
             if stackset_result:
@@ -549,42 +594,50 @@ def lambda_handler(event, context):
                 # SNS Topic is present for other stack instances
                 # to publish registration request
                 core_accounts = set([security_account, log_archive_account, audit_account])
-                accounts = list(core_accounts.difference({security_account}))
+                accounts = list(core_accounts.difference({audit_account}))
+                regions = str(event['ResourceProperties']['TargetRegion']).split(",")
 
+                # Deploy stackset to core accounts
                 create_stack_instance(
-                    target_session=session,
-                    stackset_name=event['ResourceProperties']['StackSetName'],
-                    org_id=org_id,
-                    accounts=[security_account],
-                    regions=str(
-                        event['ResourceProperties']['TargetRegion']).split(","),
-                    wait_for_completion=True
+                        target_session=session,
+                        stackset_name=stackset_name,
+                        org_id=org_id,
+                        accounts=[audit_account],
+                        regions=regions,
+                        wait_for_completion=True
                     )
 
+                # Deploy stackset to Log Archive account
                 # Create stack instances for the rest of the accounts
                 create_stack_instance(
-                    target_session=session,
-                    stackset_name=event['ResourceProperties']['StackSetName'],
-                    org_id=org_id,
-                    accounts=accounts,
-                    regions=str(
-                        event['ResourceProperties']['TargetRegion']).split(","),
-                    wait_for_completion=True
+                        target_session=session,
+                        stackset_name=stackset_name,
+                        org_id=org_id,
+                        accounts=[log_archive_account],
+                        regions=regions,
+                        parameter_overrides = [
+                                {
+                                    "ParameterKey": "AlertLogicCentralizedRoleArn",
+                                    "ParameterValue": ci_x_audit_account_role_arn
+                                }
+                            ],
+                        wait_for_completion=True
                     )
-
+                accounts.remove(log_archive_account)
                 # Create accounts for specified OUs, if any
                 protected_accounts = get_protected_accounts(
                     included_ou_list=event['ResourceProperties']['IncludeOrganizationalUnits'],
                     excluded_ou_list=event['ResourceProperties']['ExcludeOrganizationalUnits'],
+                    master_account=account,
                     core_accounts=core_accounts
                     )
+                accounts.extend(protected_accounts)
                 create_stack_instance(
-                    target_session=session,
-                    stackset_name=event['ResourceProperties']['StackSetName'],
-                    org_id=org_id,
-                    accounts=protected_accounts,
-                    regions=str(
-                        event['ResourceProperties']['TargetRegion']).split(",")
+                        target_session=session,
+                        stackset_name=stackset_name,
+                        org_id=org_id,
+                        accounts=accounts,
+                        regions=regions
                     )
 
             LOGGER.info("StackSet status : {}".format(stackset_result))

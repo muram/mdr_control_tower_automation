@@ -29,9 +29,10 @@ tag_keyword = str(os.environ['tag_keys']).replace(" ", "").split(",")
 tag_value = str(os.environ['tag_public_values']).replace(" ", "").split(",")
 registration_topic = os.environ['RegistrationSNS']
 
-def is_protected(region, asset):
+def is_protected(asset, tags):
     for tag in asset['Tags']:
-        if tag['Key'] in tag_keyword and tag['Value'] in tag_value:
+        if f"{tag['Key']}:{tag['Value']}" in tags:
+        # if tag['Key'] in tag_keyword and tag['Value'] in tag_value:
             return True
     return False
     
@@ -39,12 +40,13 @@ def is_protected(region, asset):
 def get_asset_key(region, type, id):
     return f'/aws/{region}/{type}/{id}'
     
-def get_vpcs_scope(client, tag_keyword, scope=[], next_token=None):
+def get_vpcs_scope(client, tags, scope=[], next_token=None):
     type = 'vpc'
+    tag_keys = [v.split(':')[0] for v in tags.split(',')]
     Filters = [
                 {
                     'Name': 'tag-key',
-                    'Values': tag_keyword
+                    'Values': tag_keys
                 }
             ]
     if next_token:
@@ -58,43 +60,15 @@ def get_vpcs_scope(client, tag_keyword, scope=[], next_token=None):
                 'key': get_asset_key(session.region_name, type, vpc['VpcId']),
                 'type': type
             }
-            for vpc in response['Vpcs'] if is_protected(session.region_name, vpc)
+            for vpc in response['Vpcs'] if is_protected(vpc, tags)
         ]
     )
     if 'NextToken' in response:
         return get_vpcs_scope(
-            scope, client, tag_keyword, scope, response['NextToken'])
+            scope, client, tags, scope, response['NextToken'])
     else:
         return scope
     
-def get_subnets_scope(client, tag_keyword, scope=[], next_token=None):
-    type = 'subnet'
-    Filters = [
-                {
-                    'Name': 'tag-key',
-                    'Values': tag_keyword
-                }
-            ]
-    if next_token:
-        response = client.describe_subnets(Filters=Filters, MaxResults=100, NextToken=next_token)
-    else:
-        response = client.describe_subnets(Filters=Filters, MaxResults=100)
-        
-    scope.extend(
-        [
-            {
-                'key': get_asset_key(session.region_name, type, subnet['SubnetId']),
-                'type': type
-            }
-            for subnet in response['Subnets'] if is_protected(session.region_name, subnet)
-        ]
-    )
-    if 'NextToken' in response:
-        return get_subnets_scope(
-            scope, client, tag_keyword, scope, response['NextToken'])
-    else:
-        return scope
-        
         
 def cfnresponse_send(
         event, context, responseStatus, responseData,
@@ -134,9 +108,13 @@ def lambda_handler(event, context):
 
         if event['RequestType'] == 'Create':
             client = session.client('ec2')
-
-            scope = get_vpcs_scope(client, tag_keyword)
-            # scope.extend(get_subnets_scope(client, tag_keyword))
+            
+            tags = event['ResourceProperties']['CoverageTags']
+            scope = get_vpcs_scope(
+                client,
+                event['ResourceProperties']['CoverageTags']
+            )
+            
             LOGGER.info(f'Protection Scope: {scope}')
             
             client = session.client('sns')

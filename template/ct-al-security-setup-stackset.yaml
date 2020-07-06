@@ -40,6 +40,13 @@ Parameters:
         Note that the name of the bucket must contain a region name suffix.
         The following is the valid backet name syntax = <bucket_name_prefix>.us-east-1
     Default: alertlogic-public-repo
+  AlertLogicApiEndpoint:
+    Type: String
+    Description: AlertLogic API Endpoint to use
+    Default: Production
+    AllowedValues:
+      - Production
+      - Integration
 
 Mappings: 
   SourceCode:
@@ -51,7 +58,7 @@ Resources:
     Type: AWS::SecretsManager::Secret
     Properties:
       Description: AlertLogic API Credentials
-      Name: ALCredentialsSecret
+      Name: !Join ['', ['ALCredentialsSecret', !Ref AlertLogicApiEndpoint]]
       SecretString:
         Fn::Join:
         - ''
@@ -67,7 +74,7 @@ Resources:
     Type: "AWS::SNS::Topic"
     Properties:
       DisplayName: AlertLogic Topic for Role registration      
-      TopicName: AlertLogicCTHubTopic
+      TopicName: !Join ['', ['AlertLogicCTHubTopic', !Ref AlertLogicApiEndpoint]]
 
   ALHubTopicPolicy:
     Type: AWS::SNS::TopicPolicy
@@ -104,7 +111,7 @@ Resources:
   ALRegister:
     Type: "AWS::Lambda::Function"
     Properties:
-      FunctionName: AlertLogic-CT-Register
+      FunctionName: !Join ['-', ['AlertLogic-CT-Register', !Ref AlertLogicApiEndpoint]]
       Description: CT AL - Function to handle AlertLogic deployment registration
       Handler: "ct_al_register.lambda_handler"
       Role: !GetAtt ALRegisterRole.Arn
@@ -119,11 +126,12 @@ Resources:
           Secret: !Ref ALCredentials
           FullRegionCoverage: !Ref FullRegionCoverage
           TargetRegion: !Ref TargetRegion
+          AlertLogicApiEndpoint: !Ref AlertLogicApiEndpoint
 
   ALRegisterRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: AlertLogic-Register-Role
+      RoleName: !Join ['-', ['AlertLogic-Register-Role', !Ref AlertLogicApiEndpoint]]
       Description: CT AL - Role used by lambda for life cycle / new account creation
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -160,7 +168,7 @@ Resources:
   ALRegisterDLQ:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: ALRegisterDLQ
+      QueueName: !Join ['', ['ALRegisterDLQ', !Ref AlertLogicApiEndpoint]]
 
   ALRegisterDLQPolicy:
     Type: AWS::SQS::QueuePolicy
