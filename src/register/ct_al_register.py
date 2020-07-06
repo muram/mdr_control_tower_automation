@@ -25,6 +25,10 @@ LOGGER = logging.getLogger()
 LOGGER.setLevel(logging.INFO)
 almdrlib.set_logger('almdrlib', logging.INFO)
 
+global_endpoint = os.environ.get('AlertLogicApiEndpoint', 'production').lower()
+region_coverage = os.environ['FullRegionCoverage'] == 'true'
+regions = str(os.environ['TargetRegion']).replace(" ", "").split(",")
+
 session = boto3.Session()
 
 def cfnresponse_send(event, context, responseStatus, responseData, physicalResourceId=None, noEcho=False):
@@ -105,8 +109,10 @@ def get_policy_id(client, al_account_id):
     try:
         policies = client.list_policies(account_id=al_account_id).json()
         for policy in policies:
-            if policy['name'] == 'Professional':
+            if policy['name'] in ['Professional', 'Enterprise']:
+                LOGGER.inf(f"Policy ID for {al_account_id} is {policy['id']}")
                 return policy['id']
+
         LOGGER.Error(f"Cannot find 'Professional' policy id")
         return None
     except Exception as e:
@@ -115,17 +121,24 @@ def get_policy_id(client, al_account_id):
         
 
 def get_scope(policy_id, scope):
-    policy = {'id': policy_id}
-    return [
-            {
-                'key': asset['key'],
-                'type': asset['type'],
-                'policy': policy
+    # Get protection policy ID
+    if not policy_id:
+        return []
+        
+    return [{
+                'key': asset_key,
+                'type': 'region',
+                'policy': {
+                    'id': policy_id
+                }
             }
-            for asset in scope
-        ]
+            for asset_key in scope]
+
 
 def handle_update_notification(session, context, sns_event):
+    if region_coverage:
+        return
+    
     try:
         al_credentials = get_secret(
                 session, 
@@ -140,7 +153,9 @@ def handle_update_notification(session, context, sns_event):
         auth = json.loads(al_credentials)
         al_session = almdrlib.Session(
                 access_key_id=auth['ALAccessKey'],
-                secret_key=auth['ALSecretKey'])
+                secret_key=auth['ALSecretKey'],
+                global_endpoint=global_endpoint
+            )
                 
         deployments_client = al_session.client('deployments')
         deployment = get_deployment(
@@ -150,12 +165,14 @@ def handle_update_notification(session, context, sns_event):
         if not deployment: return
     
         # Get protection policy ID
-        policy_id = get_policy_id(al_session.client('policies'), auth['ALCID'])
+        policy_id = get_policy_id(
+                al_session.client('policies'),
+                auth['ALCID']
+                )
         if not policy_id: return
     
         deployment['scope']['include'] = get_scope(policy_id, sns_event['scope'])
-        # LOGGER.info(f"Updating {deployment['name']} deployment scope. New scope: {deployment['scope']['include']}")
-        
+
         result = deployments_client.update_deployment(
             account_id=auth['ALCID'],
             deployment_id=deployment['id'],
@@ -167,7 +184,8 @@ def handle_update_notification(session, context, sns_event):
     except Exception as e:
         LOGGER.exception(e)
         
-def handle_create_notification(session, context, sns_event, response_data):
+        
+def handle_create_notification(session, context, sns_event, include_scope, response_data):
     try:
         al_credentials = get_secret(
                 session, 
@@ -182,11 +200,12 @@ def handle_create_notification(session, context, sns_event, response_data):
                     
         # Create Alert Logic Deployment Credentials
         auth = json.loads(al_credentials)
-        credentials_client = almdrlib.client(
-            'credentials', 
-            access_key_id=auth['ALAccessKey'],
-            secret_key=auth['ALSecretKey'])
-                
+        al_session = almdrlib.Session(
+                access_key_id=auth['ALAccessKey'],
+                secret_key=auth['ALSecretKey'],
+                global_endpoint=global_endpoint
+            )
+        credentials_client = al_session.client('credentials')
         account_id = sns_event['ResourceProperties']['CID']
         response = credentials_client.create_credential(
             account_id=account_id,
@@ -195,7 +214,7 @@ def handle_create_notification(session, context, sns_event, response_data):
                 'type': 'aws_iam_role',
                 'arn': sns_event['ResourceProperties']['ALSourceRoleArn']
             }).json()
-                        
+
         cred_id = response['id']
         LOGGER.info(f"AlertLogic Linked Account Cred Id: {cred_id}")
     
@@ -211,13 +230,11 @@ def handle_create_notification(session, context, sns_event, response_data):
         LOGGER.info(f"AlertLogic Cross Account Cred Id: {cred_x_id}")
                     
         # Create Alert Logic Deployment
-        deployments_client = almdrlib.client(
-            'deployments', 
-            access_key_id=auth['ALAccessKey'],
-            secret_key=auth['ALSecretKey']
-            )
         aws_account_id = sns_event['ResourceProperties']['AccountId']
         mode = sns_event['ResourceProperties']['AlertLogicDeploymentMode']
+        policy_id = get_policy_id(al_session.client('policies'), auth['ALCID'])
+
+        deployments_client = al_session.client('deployments')
         response = deployments_client.create_deployment(
             account_id=account_id,
             credentials=[
@@ -234,11 +251,14 @@ def handle_create_notification(session, context, sns_event, response_data):
                 'id': aws_account_id
             },
             scope={
-                'include': [],
+                'include': get_scope(
+                        policy_id=policy_id,
+                        scope=include_scope
+                    ),
                 'exclude': []
             }
             )
-        LOGGER.info(f"Created Alert Logic Deployment: {response.json()}")
+        LOGGER.info(f"Created Alert Logic Deployment: {json.dumps(response.json(), default=str)}")
     
         cfnresponse_send(sns_event, context, 'SUCCESS', response_data, "CustomResourcePhysicalID")
     except Exception as e:
@@ -257,7 +277,13 @@ def lambda_handler(event, context):
         if sns_event['RequestType'] == 'Create':
             response_data = {}
             response_data["event"] = event
-            handle_create_notification(session, context, sns_event, response_data)
+            handle_create_notification(
+                session,
+                context,
+                sns_event,
+                [f'/aws/{region}' for region in regions],
+                response_data
+            )
         elif sns_event['RequestType'] == 'UpdateScope':
             handle_update_notification(session, context, sns_event)
         else:
