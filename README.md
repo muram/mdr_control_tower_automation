@@ -38,7 +38,8 @@ In the solution architecture overview we will use the following terminology:
 	* Update Master Account to create new CloudFormation StackSet instance for enrolled account when an account is enrolled to be governed by AWS Control Tower.
 	* Update protected accounts to publish VPC tag changes to Security Account's Event Bus.
 	
-[Architecture Diagram](architecture.png)
+Architecture Diagram:
+(architecture.png)
 
 
 
