@@ -28,22 +28,49 @@ In the solution architecture overview we will use the following terminology:
 3. Log Archive Account - Shared AWS Control Tower account where Cloud Trail logs are stored.
 4. Security Account - An AWS Control Tower managed account that hosts Alert Logic MDR automation Infrastructure (Lambdas and Event Bus)
 5. Protected account - An AWS Control Tower account to be protected by Alert Logic MDR.
-
-##### Deployment Process
-1. The solution is deployed via creation of AWS CloudFormation Stack using this template <https://s3.amazonaws.com/alertlogic-public-repo.us-east-1/templates/ct-al-master-onboarding.yaml>
-2. This Stack will:
-	* Create all necessary IAM Roles for cross-account integration between Alert Logic MDR AWS Account and accounts selected to be protected by this integration.
-	* Set up SQS subscription to AWS Cloud Trail SNS Topic
-	* Deploy Alert Logic MDR automation (Lambdas and EventBus) to designated Security Account
-	* Update Master Account to create new CloudFormation StackSet instance for enrolled account when an account is enrolled to be governed by AWS Control Tower.
-	* Update protected accounts to publish VPC tag changes to Security Account's Event Bus.
 	
 ![Architecture Diagram](architecture.png)
+
+1.	AWS Control Tower published the Lifecycle events after successful enrollment of AWS accounts. The Lifecycle event invokes the AWS Lambda function to deploy the AWS CloudFormation StackSet instance into the new AWS account. 
+2.	The StackSet instance creates the required pre-requisite IAM role for Alert Logic MDR. It also sends a notification to an SNS topic located in the security account. 
+3.	In the security account, a Lambda function is subscribed to this SNS topic. When this Lambda function runs, it registers the new AWS account into Alert Logic MDR.
+4.	When the user updates a VPC by adding or removing an AWS tag with the Alert Logic identifier, this operation generates an event. 
+5.	The events are forwarded by the EventBridge rule to the security account where another Lambda function updates the protection scope in Alert Logic MDR platform.
+6.	Alert Logic MDR platform automatically scans and deploys the security appliances to the new AWS account based on the registration information and the deployment scope. 
 
 
 
 #### Deployment
 ##### Prerequisites
 
-```Note: Audit, Log Archive and Security Accounts are always protected by Alert Logic MDR```
+1. Active subscription to Alert Logic MDR
+2. AWS Control Tower deployed and configured.
 
+
+##### Deployment Process
+1. The solution is deployed via creation of AWS CloudFormation Stack using this template <https://s3.amazonaws.com/alertlogic-public-repo.us-east-1/templates/ct-al-master-onboarding.yaml>
+2. Information needed by CloudFormation
+	* **Alert Logic Account ID**
+	* **Valid API Access Key ID and the Secret**
+	* **Deployment Mode** - Automatic or Manual
+	* **AWS Account ID to deploy Alert Logic's AWS Control Tower Automation to** - AWS Account ID of the designated Security Automation account
+	* **Organization Units to protect** - List of OUs to protect
+	* **Organization Units to exclude** - All OUs will be protected except the ones listed here
+	* **Target Region(s) - List of regions to protect
+	* **Protect All VPCs in each region** - If `true`, all VPCs will be protected.
+	* **VPC Tags to protect** - VPCs that have any of the Key:Value tags in this list will be protected. ```Note: If a 'Protect All VPCs in each region' option is set to true, this value is ignored.```
+	* **Organization ID** - AWS Organization ID for which this automation is being deployed
+	* **Log Archive Account ID** - Shared AWS Control Tower account where Cloud Trail logs are stored.
+	* **Audit Account ID** - Shared AWS Control Tower account that hosts SNS Topic used to publish account's Cloud Trail notifications
+	
+	
+
+3. The Stack will:
+	* Create all necessary IAM Roles for cross-account integration between Alert Logic MDR AWS Account and accounts selected to be protected by this integration.
+	* Set up SQS subscription to AWS Cloud Trail SNS Topic
+	* Deploy Alert Logic MDR automation (Lambdas and EventBus) to designated Security Account. This is done via creation of a StackSet and creating an StackSet instance in the designated Security Account.
+	* Update Master Account to create new CloudFormation StackSet instance for enrolled account when an account is enrolled to be governed by AWS Control Tower.
+	* Create a Master StackSet and deploy it to all protected accounts.
+	
+
+```Note: Audit, Log Archive and Security Accounts are always protected by Alert Logic MDR```
