@@ -110,7 +110,7 @@ def get_policy_id(client, al_account_id):
         policies = client.list_policies(account_id=al_account_id).json()
         for policy in policies:
             if policy['name'] in ['Professional', 'Enterprise']:
-                LOGGER.inf(f"Policy ID for {al_account_id} is {policy['id']}")
+                LOGGER.info(f"Policy ID for {al_account_id} is {policy['id']}")
                 return policy['id']
 
         LOGGER.Error(f"Cannot find 'Professional' policy id")
