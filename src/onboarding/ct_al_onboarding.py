@@ -347,7 +347,9 @@ def get_protected_accounts(included_ou_list, excluded_ou_list, master_account, c
 def create_stack_instance(
         target_session, stackset_name, org_id, accounts, regions,
         parameter_overrides=None,
-        wait_for_completion=False, outputs=False):
+        wait_for_completion=False,
+        outputs=False,
+        allow_failures=False):
     '''
     Create stackset in particular account + region
     '''
@@ -364,6 +366,8 @@ def create_stack_instance(
         }
         if parameter_overrides:
             kwargs['ParameterOverrides'] = parameter_overrides
+        if allow_failures:
+            kwargs['OperationPreferences'] = {'FailureTolerancePercentage': 100}
             
         response = cfn_client.create_stack_instances(**kwargs)
         operation_id = response["OperationId"]
@@ -637,7 +641,8 @@ def lambda_handler(event, context):
                         stackset_name=stackset_name,
                         org_id=org_id,
                         accounts=accounts,
-                        regions=regions
+                        regions=regions,
+                        allow_failures=True
                     )
 
             LOGGER.info("StackSet status : {}".format(stackset_result))
