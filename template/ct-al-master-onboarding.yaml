@@ -51,8 +51,6 @@ Parameters:
     Type: String
     Description: Name of the StackSet that will be deployed in Control Tower Master account
     Default: 'AlertLogic-CT'
-    AllowedValues:
-      - "AlertLogic-CT"
   StackSetTemplateUrl:
     Type: String
     Description: S3 URL of the stackset template (ct-al-master-stackset.yaml)
@@ -77,14 +75,10 @@ Parameters:
     Type: String
     Description: Name of the Cloud Trail Logs Collection IAM Role StackSet. This StackSet will be deployed in Control Tower Master account
     Default: 'AlertLogic-CT-Central-IAM-Role'
-    AllowedValues:
-      - "AlertLogic-CT-Central-IAM-Role"
   SecurityAccountSetupStackSetName:
     Type: String
     Description: Name of the Security Account Setup StackSet that will be deployed in the Security Account
     Default: 'AlertLogic-CT-Security-Account-Setup'
-    AllowedValues:
-      - "AlertLogic-CT-Security-Account-Setup"
   SecurityAccountSetupStackSetTemplateUrl:
     Type: String
     Description: S3 URL of the stackset template (ct-al-master-stackset.yaml)
